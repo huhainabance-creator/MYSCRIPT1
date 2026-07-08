@@ -142,6 +142,63 @@ local function setFarmStatus(text)
     farmStatusText = text
 end
 
+local function safeGetPartPosition(part)
+    local ok, pos = pcall(function()
+        return part.Position
+    end)
+    if ok then return pos end
+    return nil
+end
+
+local function safeGetPartTransparency(part)
+    local ok, transparency = pcall(function()
+        return part.Transparency
+    end)
+    if ok then return transparency end
+    return 1
+end
+
+local function safeIsPromptEnabled(prompt)
+    local ok, enabled = pcall(function()
+        return prompt.Enabled
+    end)
+    if ok then return enabled end
+    return false
+end
+
+local function safeGetPromptObjectText(prompt)
+    local ok, text = pcall(function()
+        return prompt.ObjectText
+    end)
+    if ok then return text end
+    return nil
+end
+
+local function safeUnlockPrompt(prompt)
+    if not prompt or not prompt:IsA("ProximityPrompt") then return end
+    pcall(function()
+        prompt.RequiresLineOfSight = false
+        prompt.HoldDuration = 0
+        prompt.MaxActivationDistance = 50
+        prompt.Enabled = true
+    end)
+end
+
+local function UnlockPrompts()
+    while true do
+        pcall(function()
+            for _, desc in ipairs(workspace:GetDescendants()) do
+                if desc:IsA("ProximityPrompt") then
+                    safeUnlockPrompt(desc)
+                end
+            end
+        end)
+        task.wait(0.5)
+    end
+end
+
+task.spawn(UnlockPrompts)
+
 local function isInvalidItemPart(obj)
     if not obj then return true end
     local current = obj
@@ -181,11 +238,17 @@ local function banCoordinate(pos)
 end
 
 local function resolveItemFromPrompt(desc)
-    if not desc or not desc:IsA("ProximityPrompt") or not desc.Parent then
+    if not desc or not desc:IsA("ProximityPrompt") then
         return nil
     end
 
-    local parent = desc.Parent
+    local parentOk, parent = pcall(function()
+        return desc.Parent
+    end)
+    if not parentOk or not parent then
+        return nil
+    end
+
     local model = parent:IsA("Model") and parent or parent.Parent
     local itemName = ""
 
@@ -193,8 +256,11 @@ local function resolveItemFromPrompt(desc)
         itemName = parent.Name
     elseif model and _G.SelectedItems[model.Name] ~= nil then
         itemName = model.Name
-    elseif desc.ObjectText and _G.SelectedItems[desc.ObjectText] ~= nil then
-        itemName = desc.ObjectText
+    else
+        local objectText = safeGetPromptObjectText(desc)
+        if objectText and _G.SelectedItems[objectText] ~= nil then
+            itemName = objectText
+        end
     end
 
     if itemName == "" then
@@ -205,13 +271,21 @@ local function resolveItemFromPrompt(desc)
         or parent:FindFirstChildWhichIsA("BasePart")
         or (model and model:FindFirstChildWhichIsA("BasePart"))
 
-    if not targetPart or targetPart.Transparency >= 1 then
+    if not targetPart then
         return nil
     end
-    if isCoordinateBanned(targetPart.Position) or isInvalidItemPart(targetPart) then
+
+    local transparency = safeGetPartTransparency(targetPart)
+    if transparency >= 1 then
         return nil
     end
-    if not desc.Enabled then
+
+    local position = safeGetPartPosition(targetPart)
+    if not position or isCoordinateBanned(position) or isInvalidItemPart(targetPart) then
+        return nil
+    end
+
+    if not safeIsPromptEnabled(desc) then
         return nil
     end
 
@@ -220,7 +294,7 @@ local function resolveItemFromPrompt(desc)
         part = targetPart,
         parent = parent,
         name = itemName,
-        position = targetPart.Position,
+        position = position,
     }
 end
 
@@ -247,14 +321,16 @@ local function refreshItemCache()
     lastCacheRefresh = now
     table.clear(itemCache)
 
-    for _, desc in ipairs(workspace:GetDescendants()) do
-        if desc:IsA("ProximityPrompt") then
-            local item = resolveItemFromPrompt(desc)
-            if item and shouldFarmItem(item.name) then
-                table.insert(itemCache, item)
+    pcall(function()
+        for _, desc in ipairs(workspace:GetDescendants()) do
+            if desc:IsA("ProximityPrompt") then
+                local item = resolveItemFromPrompt(desc)
+                if item and shouldFarmItem(item.name) then
+                    table.insert(itemCache, item)
+                end
             end
         end
-    end
+    end)
 
     return itemCache
 end
@@ -263,9 +339,18 @@ local function getNearestItem(hrp)
     local nearest
     local shortest = math.huge
 
+    local hrpPos = safeGetPartPosition(hrp)
+    if not hrpPos then
+        return nil, math.huge
+    end
+
     for _, item in ipairs(refreshItemCache()) do
-        if item.prompt:IsDescendantOf(workspace) and not isInvalidItemPart(item.parent) then
-            local dist = (hrp.Position - item.position).Magnitude
+        local promptOk = pcall(function()
+            return item.prompt:IsDescendantOf(workspace)
+        end)
+        if promptOk and not isInvalidItemPart(item.parent) then
+            local position = safeGetPartPosition(item.part) or item.position
+            local dist = (hrpPos - position).Magnitude
             if dist < shortest then
                 shortest = dist
                 nearest = item
@@ -278,33 +363,40 @@ end
 
 local function applyESP(part, name)
     if espObjects[part] then return end
-    if not part or part.Transparency == 1 or isCoordinateBanned(part.Position) or isInvalidItemPart(part) then
+
+    local position = safeGetPartPosition(part)
+    local transparency = safeGetPartTransparency(part)
+    if not part or transparency >= 1 or not position or isCoordinateBanned(position) or isInvalidItemPart(part) then
         return
     end
 
-    local bgui = Instance.new("BillboardGui")
-    bgui.Name = "YBA_Item_ESP"
-    bgui.AlwaysOnTop = true
-    bgui.Size = UDim2.new(0, 140, 0, 32)
-    bgui.Adornee = part
+    pcall(function()
+        local bgui = Instance.new("BillboardGui")
+        bgui.Name = "YBA_Item_ESP"
+        bgui.AlwaysOnTop = true
+        bgui.Size = UDim2.new(0, 140, 0, 32)
+        bgui.Adornee = part
 
-    local text = Instance.new("TextLabel")
-    text.Parent = bgui
-    text.BackgroundTransparency = 1
-    text.Size = UDim2.new(1, 0, 1, 0)
-    text.Text = name
-    text.TextColor3 = Color3.fromRGB(0, 255, 255)
-    text.TextSize = 14
-    text.Font = Enum.Font.GothamBold
-    text.TextStrokeTransparency = 0
+        local text = Instance.new("TextLabel")
+        text.Parent = bgui
+        text.BackgroundTransparency = 1
+        text.Size = UDim2.new(1, 0, 1, 0)
+        text.Text = name
+        text.TextColor3 = Color3.fromRGB(0, 255, 255)
+        text.TextSize = 14
+        text.Font = Enum.Font.GothamBold
+        text.TextStrokeTransparency = 0
 
-    bgui.Parent = part
-    espObjects[part] = bgui
+        bgui.Parent = part
+        espObjects[part] = bgui
+    end)
 end
 
 local function clearESP()
     for part, gui in pairs(espObjects) do
-        if gui then gui:Destroy() end
+        pcall(function()
+            if gui then gui:Destroy() end
+        end)
         espObjects[part] = nil
     end
     table.clear(espObjects)
@@ -319,8 +411,10 @@ end
 
 local function zeroHrpVelocity(hrp)
     if not hrp then return end
-    hrp.AssemblyLinearVelocity = Vector3.zero
-    hrp.AssemblyAngularVelocity = Vector3.zero
+    pcall(function()
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        hrp.AssemblyAngularVelocity = Vector3.zero
+    end)
 end
 
 local function cleanupFlight()
@@ -335,7 +429,9 @@ local function cleanupFlight()
         flightState.heartbeatConn:Disconnect()
     end
     if flightState.cframeValue then
-        flightState.cframeValue:Destroy()
+        pcall(function()
+            flightState.cframeValue:Destroy()
+        end)
     end
 
     flightState = nil
@@ -359,17 +455,36 @@ local function ensureNoClip()
         local hrp = char:FindFirstChild("HumanoidRootPart")
         for _, part in ipairs(char:GetDescendants()) do
             if part:IsA("BasePart") and part ~= hrp then
-                part.CanCollide = false
+                pcall(function()
+                    part.CanCollide = false
+                end)
             end
         end
     end)
 end
 
+local function firePromptReliably(prompt)
+    safeUnlockPrompt(prompt)
+    for i = 1, 4 do
+        pcall(function()
+            fireproximityprompt(prompt, 0)
+        end)
+        task.wait(0.05)
+    end
+end
+
 local function moveToItemAndPickup(item)
-    if not item or not item.part or not item.part:IsDescendantOf(workspace) then
+    if not item or not item.part or not item.prompt then
         return false
     end
-    if not item.prompt or not item.prompt:IsDescendantOf(workspace) then
+
+    local partExists = pcall(function()
+        return item.part:IsDescendantOf(workspace)
+    end)
+    local promptExists = pcall(function()
+        return item.prompt:IsDescendantOf(workspace)
+    end)
+    if not partExists or not promptExists then
         return false
     end
     if isInvalidItemPart(item.parent) then
@@ -386,8 +501,20 @@ local function moveToItemAndPickup(item)
     cframeValue.Value = hrp.CFrame
     cframeValue.Parent = player
 
-    local targetCFrame = CFrame.new(item.part.Position + Vector3.new(0, 1.2, 0))
-    local distance = (targetCFrame.Position - hrp.Position).Magnitude
+    local itemPosition = safeGetPartPosition(item.part)
+    if not itemPosition then
+        cleanupFlight()
+        return false
+    end
+
+    local targetCFrame = CFrame.new(itemPosition + Vector3.new(0, 1.2, 0))
+    local hrpPos = safeGetPartPosition(hrp)
+    if not hrpPos then
+        cleanupFlight()
+        return false
+    end
+
+    local distance = (targetCFrame.Position - hrpPos).Magnitude
     local tweenTime = math.max(distance / _G.FlySpeed, 0.05)
 
     local tween = TweenService:Create(
@@ -401,12 +528,16 @@ local function moveToItemAndPickup(item)
         local currentHrp = char:FindFirstChild("HumanoidRootPart")
         if not currentHrp or not cframeValue.Parent then return end
 
-        currentHrp.CFrame = cframeValue.Value
+        pcall(function()
+            currentHrp.CFrame = cframeValue.Value
+        end)
         zeroHrpVelocity(currentHrp)
 
         for _, part in ipairs(char:GetDescendants()) do
             if part:IsA("BasePart") and part ~= currentHrp then
-                part.CanCollide = false
+                pcall(function()
+                    part.CanCollide = false
+                end)
             end
         end
     end)
@@ -418,10 +549,13 @@ local function moveToItemAndPickup(item)
     }
 
     local function shouldContinue()
-        return _G.ItemFarm
-            and item.part:IsDescendantOf(workspace)
-            and not isInvalidItemPart(item.part)
-            and item.prompt:IsDescendantOf(workspace)
+        local partOk = pcall(function()
+            return item.part:IsDescendantOf(workspace) and not isInvalidItemPart(item.part)
+        end)
+        local promptOk = pcall(function()
+            return item.prompt:IsDescendantOf(workspace)
+        end)
+        return _G.ItemFarm and partOk and promptOk
     end
 
     tween:Play()
@@ -436,7 +570,10 @@ local function moveToItemAndPickup(item)
             cleanupFlight()
             return false
         end
-        if not hrp or not hrp.Parent then
+        local hrpAlive = pcall(function()
+            return hrp and hrp.Parent
+        end)
+        if not hrpAlive then
             cleanupFlight()
             return false
         end
@@ -448,29 +585,47 @@ local function moveToItemAndPickup(item)
         return false
     end
 
-    targetCFrame = CFrame.new(item.part.Position + Vector3.new(0, 1.2, 0))
+    itemPosition = safeGetPartPosition(item.part)
+    if not itemPosition then
+        cleanupFlight()
+        return false
+    end
+
+    targetCFrame = CFrame.new(itemPosition + Vector3.new(0, 1.2, 0))
     cframeValue.Value = targetCFrame
 
     local currentHrp = char:FindFirstChild("HumanoidRootPart")
     if currentHrp then
-        currentHrp.Anchored = true
-        currentHrp.CFrame = targetCFrame
+        pcall(function()
+            currentHrp.Anchored = true
+            currentHrp.CFrame = targetCFrame
+        end)
         zeroHrpVelocity(currentHrp)
     end
 
     task.wait(0.35)
 
-    if shouldContinue() and currentHrp and currentHrp.Parent then
-        item.prompt.RequiresLineOfSight = false
-        item.prompt.HoldDuration = 0
-        fireproximityprompt(item.prompt, 0)
-        task.wait(0.15)
-        currentHrp.Anchored = false
-    elseif currentHrp and currentHrp.Parent then
-        currentHrp.Anchored = false
+    if shouldContinue() and currentHrp then
+        local hrpStillAlive = pcall(function()
+            return currentHrp.Parent
+        end)
+        if hrpStillAlive then
+            firePromptReliably(item.prompt)
+            task.wait(0.15)
+            pcall(function()
+                currentHrp.Anchored = false
+            end)
+        end
+    elseif currentHrp then
+        pcall(function()
+            currentHrp.Anchored = false
+        end)
     end
 
-    local pickedUp = not item.prompt:IsDescendantOf(workspace) or isInvalidItemPart(item.parent)
+    local pickedUp = false
+    pcall(function()
+        pickedUp = not item.prompt:IsDescendantOf(workspace) or isInvalidItemPart(item.parent)
+    end)
 
     cleanupFlight()
     return pickedUp
@@ -738,7 +893,9 @@ FarmTab:CreateToggle({
                 if moveToItemAndPickup(targetItem) then
                     banCoordinate(targetItem.position)
                     if espObjects[targetItem.part] then
-                        espObjects[targetItem.part]:Destroy()
+                        pcall(function()
+                            espObjects[targetItem.part]:Destroy()
+                        end)
                         espObjects[targetItem.part] = nil
                     end
                     lastCacheRefresh = 0
@@ -861,6 +1018,6 @@ end
 
 Rayfield:Notify({
     Title = "UA Killer Hub",
-    Content = "Завантажено. Virtual CFrame bypass активний.",
+    Content = "Завантажено. ProximityPrompt bypass активний.",
     Duration = 4,
 })
